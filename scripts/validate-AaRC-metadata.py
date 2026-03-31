@@ -313,6 +313,26 @@ def get_clean_values(cell_value):
     
     return values
 
+def strip_cell_value(value):
+    """
+    Strips leading/trailing whitespace from a cell's value.
+    If the value contains semicolons, it splits the string, strips each part,
+    and then rejoins them.
+    """
+    if pd.isnull(value):
+        return value
+    
+    # Process as a string
+    str_val = str(value)
+
+    if ";" in str_val:
+        # Handle multi-valued cells: split, strip each part, and rejoin
+        cleaned_parts = [part.strip() for part in str_val.split(';')]
+        return ";".join(cleaned_parts)
+    else:
+        # Handle single-valued cells
+        return str_val.strip()
+
 def update_gitignore(file_pattern):
     """
     Adds a file pattern to the .gitignore file in the current directory.
@@ -537,6 +557,11 @@ def main():
                 if sheet_data.empty:
                     print(f"INFO: Sheet '{sheet_name}' is empty. Skipping.", file=sys.stderr)
                     continue
+
+                # Strip leading/trailing whitespace from all string/object columns.
+                # This cleans the data in-place before validation and release.
+                for col in sheet_data.select_dtypes(include=['object']).columns:
+                    sheet_data[col] = sheet_data[col].apply(strip_cell_value)
 
                 # --- Sanity check: verify all columns in the sheet are defined ---
                 defined_fields_set = set(validation_rules.keys())
@@ -1317,20 +1342,21 @@ def main():
         # Write Raw
         write_release_set(release_raw_dfs, make_release_prefix, raw_dir, is_raw=True)
 
+        # Collect curators for CITATION.cff and README.md
+        curators = set()
+        for df in release_raw_dfs.values():
+            if "curated_by" in df.columns:
+                for val in df["curated_by"].dropna():
+                    for n in str(val).split(';'):
+                        cleaned_name = n.strip()
+                        # Filter out empty strings and special strings like "missing" or "AaRC curator"
+                        if cleaned_name and not is_special_string(cleaned_name):
+                            curators.add(cleaned_name)
+
         # Write CITATION.cff
         cff_filename = "CITATION.cff"
         cff_path = os.path.join(base_dir, cff_filename)
         try:
-            curators = set()
-            for df in release_raw_dfs.values():
-                if "curated_by" in df.columns:
-                    for val in df["curated_by"].dropna():
-                        for n in str(val).split(';'):
-                            cleaned_name = n.strip()
-                            # Filter out empty strings and special strings like "missing" or "AaRC curator"
-                            if cleaned_name and not is_special_string(cleaned_name):
-                                curators.add(cleaned_name)
-            
             with open(cff_path, "w") as f:
                 f.write("cff-version: 1.2.0\n")
                 f.write('message: "If you use this dataset, please cite it as below."\n')
@@ -1349,10 +1375,8 @@ def main():
         except Exception as e:
             print(f"ERROR: Failed to write {cff_path}: {e}", file=sys.stderr)
 
-        # Write Release Summary
-        summary_release_filename = f"sheet-summary.{make_release_prefix}.txt"
-        summary_release_path = os.path.join(base_dir, summary_release_filename)
-        
+        # --- Prepare data for README summary ---
+        release_summary_df = pd.DataFrame() # Initialize empty
         if not stats_df.empty:
             try:
                 summary_rows = []
@@ -1392,18 +1416,16 @@ def main():
                     
                     summary_rows.append({
                         "Sheet": sheet_name,
-                        "Entries_released": entries_released,
-                        "Nuclear_data": nuc_count,
-                        "Mitochondrial_data": mt_count,
+                        "Entries released": entries_released,
+                        "Nuclear data": nuc_count,
+                        "Mitochondrial data": mt_count,
                         "Papers": len(sheet_dois),
-                        "Entries_raw": entries_raw
+                        "Entries raw": entries_raw
                     })
                 
-                # Create DataFrame with specific column order
-                cols = ["Sheet", "Entries_released", "Nuclear_data", "Mitochondrial_data", "Papers", "Entries_raw"]
+                cols = ["Sheet", "Entries released", "Nuclear data", "Mitochondrial data", "Papers", "Entries raw"]
                 release_summary_df = pd.DataFrame(summary_rows, columns=cols)
                 
-                # Add Summary row
                 if not release_summary_df.empty:
                     sums = release_summary_df[cols[1:]].sum()
                     summary_data = {"Sheet": "Summary"}
@@ -1412,11 +1434,63 @@ def main():
                     
                     summary_row = pd.DataFrame([summary_data])
                     release_summary_df = pd.concat([release_summary_df, summary_row], ignore_index=True)
-
-                release_summary_df.to_csv(summary_release_path, sep='\t', index=False)
-                print(f"RELEASE: Written {summary_release_path}", file=sys.stderr)
             except Exception as e:
-                print(f"ERROR: Failed to write {summary_release_path}: {e}", file=sys.stderr)
+                print(f"ERROR: Failed to generate release summary data for README: {e}", file=sys.stderr)
+
+        # Write README.md
+        readme_filename = "README.md"
+        readme_path = os.path.join(base_dir, readme_filename)
+        template_readme_path = "misc/template-README.md"
+        
+        try:
+            readme_content = ""
+            if os.path.exists(template_readme_path):
+                with open(template_readme_path, 'r') as f:
+                    readme_content = f.read()
+                print(f"INFO: Using '{template_readme_path}' as template for README.md.", file=sys.stderr)
+
+            # --- Summary of curated metadata section ---
+            readme_content += "\n\n## **Summary of curated metadata**\n\n"
+            if not release_summary_df.empty:
+                header = "| " + " | ".join(release_summary_df.columns) + " |\n"
+                separator = "|---" * len(release_summary_df.columns) + "|\n"
+                readme_content += header
+                readme_content += separator
+                for _, row in release_summary_df.iterrows():
+                    row_str = "| " + " | ".join(str(x) for x in row.values) + " |\n"
+                    readme_content += row_str
+            else:
+                readme_content += "No summary data available.\n"
+
+            # --- Field definitions section ---
+            readme_content += "\n\n\n## **Field definitions**\n\n"
+            readme_content += "| Field | Description |\n"
+            readme_content += "|---|---|\n"
+            
+            field_col_name = field_definitions.columns[0]
+            if 'Description' in field_definitions.columns:
+                for _, row in field_definitions.iterrows():
+                    field_name = row[field_col_name]
+                    description = row['Description']
+                    description_str = str(description).replace('|', '\|') if pd.notnull(description) else ""
+                    readme_content += f"| {field_name} | {description_str} |\n"
+            else:
+                print("WARNING: 'Description' column not found in 'field_definitions' sheet. Cannot generate Field definitions table for README.md.", file=sys.stderr)
+
+            # --- Contributors section ---
+            readme_content += "\n\n\n## **Contributors**\n\n"
+            if curators:
+                readme_content += ", ".join(sorted(list(curators))) + "\n"
+            else:
+                readme_content += "No contributors listed.\n"
+
+            # Write the final README.md
+            with open(readme_path, 'w') as f:
+                f.write(readme_content)
+            print(f"RELEASE: Written {readme_path}", file=sys.stderr)
+
+        except Exception as e:
+            print(f"ERROR: Failed to write {readme_path}: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
