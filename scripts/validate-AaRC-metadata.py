@@ -1437,60 +1437,72 @@ def main():
             except Exception as e:
                 print(f"ERROR: Failed to generate release summary data for README: {e}", file=sys.stderr)
 
-        # Write README.md
+        # Update README.md
         readme_filename = "README.md"
         readme_path = os.path.join(base_dir, readme_filename)
-        template_readme_path = "misc/template-README.md"
         
-        try:
-            readme_content = ""
-            if os.path.exists(template_readme_path):
-                with open(template_readme_path, 'r') as f:
+        if not os.path.exists(readme_path):
+            print(f"INFO: '{readme_filename}' not found. No information is printed to it.", file=sys.stderr)
+        else:
+            try:
+                with open(readme_path, 'r') as f:
                     readme_content = f.read()
-                print(f"INFO: Using '{template_readme_path}' as template for README.md.", file=sys.stderr)
 
-            # --- Summary of curated metadata section ---
-            readme_content += "\n\n## **Summary of curated metadata**\n\n"
-            if not release_summary_df.empty:
-                header = "| " + " | ".join(release_summary_df.columns) + " |\n"
-                separator = "|---" * len(release_summary_df.columns) + "|\n"
-                readme_content += header
-                readme_content += separator
-                for _, row in release_summary_df.iterrows():
-                    row_str = "| " + " | ".join(str(x) for x in row.values) + " |\n"
-                    readme_content += row_str
-            else:
-                readme_content += "No summary data available.\n"
+                # --- Summary of curated metadata section ---
+                summary_content = "## **Summary of curated metadata**\n\n"
+                if not release_summary_df.empty:
+                    header = "| " + " | ".join(release_summary_df.columns) + " |\n"
+                    separator = "|---" * len(release_summary_df.columns) + "|\n"
+                    summary_content += header
+                    summary_content += separator
+                    for _, row in release_summary_df.iterrows():
+                        row_str = "| " + " | ".join(str(x) for x in row.values) + " |\n"
+                        summary_content += row_str
+                else:
+                    summary_content += "No summary data available.\n"
 
-            # --- Field definitions section ---
-            readme_content += "\n\n\n## **Field definitions**\n\n"
-            readme_content += "| Field | Description |\n"
-            readme_content += "|---|---|\n"
-            
-            field_col_name = field_definitions.columns[0]
-            if 'Description' in field_definitions.columns:
-                for _, row in field_definitions.iterrows():
-                    field_name = row[field_col_name]
-                    description = row['Description']
-                    description_str = str(description).replace('|', '\|') if pd.notnull(description) else ""
-                    readme_content += f"| {field_name} | {description_str} |\n"
-            else:
-                print("WARNING: 'Description' column not found in 'field_definitions' sheet. Cannot generate Field definitions table for README.md.", file=sys.stderr)
+                # --- Field definitions section ---
+                field_content = "## **Field definitions**\n\n"
+                field_content += "| Field | Description |\n"
+                field_content += "|---|---|\n"
+                
+                field_col_name = field_definitions.columns[0]
+                if 'Description' in field_definitions.columns:
+                    for _, row in field_definitions.iterrows():
+                        field_name = row[field_col_name]
+                        description = row['Description']
+                        description_str = str(description).replace('|', '\|') if pd.notnull(description) else ""
+                        field_content += f"| {field_name} | {description_str} |\n"
+                else:
+                    print("WARNING: 'Description' column not found in 'field_definitions' sheet. Cannot generate Field definitions table for README.md.", file=sys.stderr)
 
-            # --- Contributors section ---
-            readme_content += "\n\n\n## **Contributors**\n\n"
-            if curators:
-                readme_content += ", ".join(sorted(list(curators))) + "\n"
-            else:
-                readme_content += "No contributors listed.\n"
+                # --- Contributors section ---
+                contrib_content = "## **Contributors**\n\n"
+                if curators:
+                    contrib_content += ", ".join(sorted(list(curators))) + "\n"
+                else:
+                    contrib_content += "No contributors listed.\n"
 
-            # Write the final README.md
-            with open(readme_path, 'w') as f:
-                f.write(readme_content)
-            print(f"RELEASE: Written {readme_path}", file=sys.stderr)
+                # Helper to update or append sections
+                def update_section(text, header_title, new_text):
+                    # Matches the header line exactly up to the next "## " or the end of the file
+                    pattern = r'(?m)^' + re.escape(header_title) + r'.*?(?=^## |\Z)'
+                    if re.search(pattern, text, flags=re.DOTALL):
+                        return re.sub(pattern, new_text, text, flags=re.DOTALL)
+                    else:
+                        return text.rstrip() + "\n\n\n" + new_text
 
-        except Exception as e:
-            print(f"ERROR: Failed to write {readme_path}: {e}", file=sys.stderr)
+                readme_content = update_section(readme_content, "## **Summary of curated metadata**", summary_content.strip() + "\n\n")
+                readme_content = update_section(readme_content, "## **Field definitions**", field_content.strip() + "\n\n")
+                readme_content = update_section(readme_content, "## **Contributors**", contrib_content.strip() + "\n\n")
+
+                # Write the final README.md
+                with open(readme_path, 'w') as f:
+                    f.write(readme_content)
+                print(f"RELEASE: Updated {readme_path}", file=sys.stderr)
+
+            except Exception as e:
+                print(f"ERROR: Failed to update {readme_path}: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
