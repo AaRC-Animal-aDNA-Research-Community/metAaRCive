@@ -1,8 +1,10 @@
 ## **metAaRCive: Overview**
 
-metAaRCive is a resource of metadata for published ancient animal genomes, curated by members of [AaRC](https://animal-adna.org/). The resource is distributed as a tab-delimited text file, with each row corresponding to a single genome/sample/individual. The individual-sheets folder holds the same rows, but split across individual files corresponding to rough taxonomical groupings of organisms.
+metAaRCive is a resource of metadata for published ancient animal genomes, curated by members of [AaRC](https://animal-adna.org/). 
+The resource is distributed as a tab-delimited text file `metAaRCive.txt`, with each row corresponding to a single genome/sample/individual. 
+The `individual-sheets` folder contains files where the `metAaRCive.txt` has been split across individual files corresponding to rough taxonomical groupings of organisms.
 
-The folder raw holds a version of the resource that includes entries that did not pass validation, representing work-in-progress and will contain many formatting errors. The raw version is not recommended for most users, but is provided in case it might be useful to someone.
+The `raw` folder holds a version of the resource that includes entries that did not pass validation, representing work-in-progress and will contain many formatting errors. The raw version is not recommended for most users, but is provided in case it might be useful to someone.
 
 ## **Get involved**
 
