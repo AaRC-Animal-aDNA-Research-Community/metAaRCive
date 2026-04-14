@@ -1356,6 +1356,68 @@ def main():
         # Write CITATION.cff
         cff_filename = "CITATION.cff"
         cff_path = os.path.join(base_dir, cff_filename)
+        
+        def _normalize_name(name):
+            # Replace non-alphanumeric characters with spaces, lowercase, and sort the words
+            # This ensures robust matching (e.g., "Doe, Jane" will match "Jane Doe")
+            return tuple(sorted(re.sub(r'[^\w\s]', ' ', name.lower()).split()))
+
+        existing_authors = {}
+        if os.path.exists(cff_path):
+            try:
+                with open(cff_path, 'r') as f:
+                    lines = f.readlines()
+                
+                in_authors = False
+                current_author_lines = []
+                current_given = ""
+                current_family = ""
+                
+                for line in lines:
+                    if line.strip() == 'authors:':
+                        in_authors = True
+                        continue
+                    
+                    if in_authors:
+                        # Exit authors block if we hit a non-indented, non-empty line
+                        if line.strip() != '' and not line.startswith(' '):
+                            in_authors = False
+                            if current_author_lines:
+                                full_name = f"{current_given} {current_family}".strip()
+                                existing_authors[_normalize_name(full_name)] = current_author_lines
+                                current_author_lines = []
+                                current_given = ""
+                                current_family = ""
+                            continue
+
+                        if line.startswith('  - '):
+                            if current_author_lines:
+                                full_name = f"{current_given} {current_family}".strip()
+                                existing_authors[_normalize_name(full_name)] = current_author_lines
+                            
+                            current_author_lines = [line]
+                            current_given = ""
+                            current_family = ""
+                            
+                            if 'given-names:' in line:
+                                current_given = line.split('given-names:')[1].split('#')[0].strip().strip('"\'')
+                            elif 'family-names:' in line:
+                                current_family = line.split('family-names:')[1].split('#')[0].strip().strip('"\'')
+                                
+                        elif line.startswith('    ') and current_author_lines:
+                            current_author_lines.append(line)
+                            if 'given-names:' in line:
+                                current_given = line.split('given-names:')[1].split('#')[0].strip().strip('"\'')
+                            elif 'family-names:' in line:
+                                current_family = line.split('family-names:')[1].split('#')[0].strip().strip('"\'')
+
+                # Catch the last author block at the end of the file
+                if current_author_lines:
+                    full_name = f"{current_given} {current_family}".strip()
+                    existing_authors[_normalize_name(full_name)] = current_author_lines
+            except Exception as e:
+                print(f"WARNING: Could not parse existing CITATION.cff for author names. Proceeding with default parsing. Error: {e}", file=sys.stderr)
+
         try:
             with open(cff_path, "w") as f:
                 f.write("cff-version: 1.2.0\n")
@@ -1363,14 +1425,21 @@ def main():
                 f.write(f'title: "{make_release_prefix}"\n')
                 f.write("authors:\n")
                 for curator in sorted(curators):
-                    parts = curator.split()
-                    if len(parts) == 1:
-                        f.write(f'  - given-names: "{parts[0]}"\n')
-                    elif len(parts) > 1:
-                        family_name = parts[-1]
-                        given_names = " ".join(parts[:-1])
-                        f.write(f'  - family-names: "{family_name}"\n')
-                        f.write(f'    given-names: "{given_names}"\n')
+                    norm_curator = _normalize_name(curator)
+                    if norm_curator in existing_authors:
+                        # Reuse the exact lines from the previously edited CITATION.cff
+                        for line in existing_authors[norm_curator]:
+                            f.write(line)
+                    else:
+                        # Default parsing for newly introduced authors
+                        parts = curator.split()
+                        if len(parts) == 1:
+                            f.write(f'  - given-names: "{parts[0]}"\n')
+                        elif len(parts) > 1:
+                            given_names = parts[0]
+                            family_name = " ".join(parts[1:])
+                            f.write(f'  - family-names: "{family_name}"\n')
+                            f.write(f'    given-names: "{given_names}"\n')
             print(f"RELEASE: Written {cff_path}", file=sys.stderr)
         except Exception as e:
             print(f"ERROR: Failed to write {cff_path}: {e}", file=sys.stderr)
