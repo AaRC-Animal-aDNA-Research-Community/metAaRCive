@@ -6,6 +6,7 @@ import http.client
 from urllib.parse import urlparse
 import urllib.request
 import io
+import json
 import re
 import os
 
@@ -417,6 +418,12 @@ def parse_args():
         action="store_true",
         help="Optional: Create a release. Generates filtered (PASS) and raw outputs in multiple formats using the 'metAaRCive' prefix."
     )
+    parser.add_argument(
+        "--exclude-authors",
+        type=lambda s: [a.strip() for a in s.split(",") if a.strip()],
+        default=[],
+        help="Optional: Comma-separated list of author names to exclude from the release metadata (e.g., \"John Doe, Jane Smith\")."
+    )
     return parser.parse_args()
 
 
@@ -433,6 +440,7 @@ def main():
     xlsx_report_prefix = args.xlsx_reports
     flag_incomplete = not args.ignore_incomplete
     make_release_prefix = "metAaRCive" if args.prep_release else None
+    excluded_authors = set(args.exclude_authors) if args.exclude_authors else set()
 
     # --- Add report files to .gitignore if requested ---
     if txt_report_prefix:
@@ -1342,20 +1350,20 @@ def main():
         # Write Raw
         write_release_set(release_raw_dfs, make_release_prefix, raw_dir, is_raw=True)
 
-        # Collect curators for CITATION.cff and README.md
+        # Collect curators for .zenodo.json and README.md
         curators = set()
         for df in release_raw_dfs.values():
             if "curated_by" in df.columns:
                 for val in df["curated_by"].dropna():
                     for n in str(val).split(';'):
                         cleaned_name = n.strip()
-                        # Filter out empty strings and special strings like "missing" or "AaRC curator"
-                        if cleaned_name and not is_special_string(cleaned_name):
+                        # Filter out empty strings, special strings, and explicitly excluded authors
+                        if cleaned_name and not is_special_string(cleaned_name) and cleaned_name not in excluded_authors:
                             curators.add(cleaned_name)
 
-        # Write CITATION.cff
-        cff_filename = "CITATION.cff"
-        cff_path = os.path.join(base_dir, cff_filename)
+        # Write .zenodo.json
+        zenodo_filename = ".zenodo.json"
+        zenodo_path = os.path.join(base_dir, zenodo_filename)
         
         def _normalize_name(name):
             # Replace non-alphanumeric characters with spaces, lowercase, and sort the words
@@ -1363,86 +1371,51 @@ def main():
             return tuple(sorted(re.sub(r'[^\w\s]', ' ', name.lower()).split()))
 
         existing_authors = {}
-        if os.path.exists(cff_path):
+        zenodo_existing = None
+        if os.path.exists(zenodo_path):
             try:
-                with open(cff_path, 'r') as f:
-                    lines = f.readlines()
+                with open(zenodo_path, 'r', encoding="utf-8") as f:
+                    zenodo_existing = json.load(f)
                 
-                in_authors = False
-                current_author_lines = []
-                current_given = ""
-                current_family = ""
-                
-                for line in lines:
-                    if line.strip() == 'authors:':
-                        in_authors = True
-                        continue
-                    
-                    if in_authors:
-                        # Exit authors block if we hit a non-indented, non-empty line
-                        if line.strip() != '' and not line.startswith(' '):
-                            in_authors = False
-                            if current_author_lines:
-                                full_name = f"{current_given} {current_family}".strip()
-                                existing_authors[_normalize_name(full_name)] = current_author_lines
-                                current_author_lines = []
-                                current_given = ""
-                                current_family = ""
-                            continue
-
-                        if line.startswith('  - '):
-                            if current_author_lines:
-                                full_name = f"{current_given} {current_family}".strip()
-                                existing_authors[_normalize_name(full_name)] = current_author_lines
-                            
-                            current_author_lines = [line]
-                            current_given = ""
-                            current_family = ""
-                            
-                            if 'given-names:' in line:
-                                current_given = line.split('given-names:')[1].split('#')[0].strip().strip('"\'')
-                            elif 'family-names:' in line:
-                                current_family = line.split('family-names:')[1].split('#')[0].strip().strip('"\'')
-                                
-                        elif line.startswith('    ') and current_author_lines:
-                            current_author_lines.append(line)
-                            if 'given-names:' in line:
-                                current_given = line.split('given-names:')[1].split('#')[0].strip().strip('"\'')
-                            elif 'family-names:' in line:
-                                current_family = line.split('family-names:')[1].split('#')[0].strip().strip('"\'')
-
-                # Catch the last author block at the end of the file
-                if current_author_lines:
-                    full_name = f"{current_given} {current_family}".strip()
-                    existing_authors[_normalize_name(full_name)] = current_author_lines
+                for creator in zenodo_existing.get("creators", []):
+                    if "name" in creator:
+                        norm_name = _normalize_name(creator["name"].replace(",", " "))
+                        existing_authors[norm_name] = creator
             except Exception as e:
-                print(f"WARNING: Could not parse existing CITATION.cff for author names. Proceeding with default parsing. Error: {e}", file=sys.stderr)
+                print(f"WARNING: Could not parse existing .zenodo.json for author names. Proceeding with default parsing. Error: {e}", file=sys.stderr)
 
-        try:
-            with open(cff_path, "w") as f:
-                f.write("cff-version: 1.2.0\n")
-                f.write('message: "If you use this dataset, please cite it as below."\n')
-                f.write(f'title: "{make_release_prefix}"\n')
-                f.write("authors:\n")
-                for curator in sorted(curators):
-                    norm_curator = _normalize_name(curator)
-                    if norm_curator in existing_authors:
-                        # Reuse the exact lines from the previously edited CITATION.cff
-                        for line in existing_authors[norm_curator]:
-                            f.write(line)
-                    else:
-                        # Default parsing for newly introduced authors
-                        parts = curator.split()
-                        if len(parts) == 1:
-                            f.write(f'  - given-names: "{parts[0]}"\n')
-                        elif len(parts) > 1:
-                            given_names = parts[0]
-                            family_name = " ".join(parts[1:])
-                            f.write(f'  - family-names: "{family_name}"\n')
-                            f.write(f'    given-names: "{given_names}"\n')
-            print(f"RELEASE: Written {cff_path}", file=sys.stderr)
-        except Exception as e:
-            print(f"ERROR: Failed to write {cff_path}: {e}", file=sys.stderr)
+        creators = []
+        if zenodo_existing is not None:
+            creators = zenodo_existing.get("creators", [])
+
+            for curator in sorted(curators):
+                norm_curator = _normalize_name(curator)
+                if norm_curator not in existing_authors:
+                    # Default parsing for newly introduced authors
+                    parts = curator.split()
+                    if len(parts) == 1:
+                        name = parts[0]
+                    elif len(parts) > 1:
+                        given_names = parts[0]
+                        family_name = " ".join(parts[1:])
+                        name = f"{family_name}, {given_names}"
+                    new_creator = {"name": name}
+                    creators.append(new_creator)
+                    existing_authors[norm_curator] = new_creator
+                    print(f"RELEASE: Added new author '{name}' to .zenodo.json", file=sys.stderr)
+
+            # Sort the creators list alphabetically by name (which starts with the last name)
+            creators.sort(key=lambda x: x.get("name", "").lower())
+
+            zenodo_data = zenodo_existing
+            zenodo_data["creators"] = creators
+
+            try:
+                with open(zenodo_path, "w", encoding="utf-8") as f:
+                    json.dump(zenodo_data, f, indent=2, ensure_ascii=False)
+                print(f"RELEASE: Updated creators in existing {zenodo_path}", file=sys.stderr)
+            except Exception as e:
+                print(f"ERROR: Failed to write {zenodo_path}: {e}", file=sys.stderr)
 
         # --- Prepare data for README summary ---
         release_summary_df = pd.DataFrame() # Initialize empty
@@ -1547,8 +1520,18 @@ def main():
 
                 # --- Contributors section ---
                 contrib_content = "## **Contributors**\n\n"
-                if curators:
-                    contrib_content += ", ".join(sorted(list(curators))) + "\n"
+                if creators:
+                    contributor_names = []
+                    for c in creators:
+                        raw_name = c.get("name", "")
+                        if "," in raw_name:
+                            parts = raw_name.split(",", 1)
+                            formatted_name = f"{parts[1].strip()} {parts[0].strip()}"
+                        else:
+                            formatted_name = raw_name.strip()
+                        if formatted_name:
+                            contributor_names.append(formatted_name)
+                    contrib_content += ", ".join(contributor_names) + "\n"
                 else:
                     contrib_content += "No contributors listed.\n"
 

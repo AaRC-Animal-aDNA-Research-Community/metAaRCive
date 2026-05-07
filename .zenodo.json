@@ -1,0 +1,82 @@
+{
+  "title": "metAaRCive",
+  "upload_type": "dataset",
+  "creators": [
+    {
+      "name": "Bergström, Anders"
+    },
+    {
+      "name": "Daly, Kevin G."
+    },
+    {
+      "name": "de Jager, Deon"
+    },
+    {
+      "name": "De Martino, Marco"
+    },
+    {
+      "name": "Dehasque, Marianne"
+    },
+    {
+      "name": "Erven, Jolijn"
+    },
+    {
+      "name": "Ferguson, Róisín"
+    },
+    {
+      "name": "Garikipati, Lohit"
+    },
+    {
+      "name": "Goodchild, Owen"
+    },
+    {
+      "name": "Hernández-Alonso, Germán"
+    },
+    {
+      "name": "Kitaygorodskiy, Dani"
+    },
+    {
+      "name": "Kopp, Gisela"
+    },
+    {
+      "name": "Larsdotter, Juliana"
+    },
+    {
+      "name": "Moots, Hannah"
+    },
+    {
+      "name": "Popovici, George"
+    },
+    {
+      "name": "Psonis, Nikolaos"
+    },
+    {
+      "name": "Scarsbrook, Lachie"
+    },
+    {
+      "name": "Sherman, Mattias"
+    },
+    {
+      "name": "Viñas-Caron, Laura C."
+    },
+    {
+      "name": "Yu, He"
+    },
+    {
+      "name": "Zhao, Zhihan"
+    }
+  ],
+  "communities": [
+    {
+      "identifier": "animal-adna-research-community"
+    }
+  ],
+  "license": "CC-BY-4.0",
+  "keywords": [
+    "ancient DNA",
+    "genomics",
+    "paleogenomics",
+    "zooarchaeology",
+    "community curation"
+  ]
+}
