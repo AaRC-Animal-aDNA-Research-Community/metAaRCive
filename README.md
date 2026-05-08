@@ -83,5 +83,4 @@ To contribute to the resource, join our Element channel (see https://animal-adna
 
 ## **Contributors**
 
-Anders Bergström, Dani Kitaygorodskiy, Deon de Jager, George Popovici, Germán Hernández-Alonso, Gisela Kopp, Hannah Moots, He Yu, Jolijn Erven, Juliana Larsdotter, Kevin Daly, Lachie Scarsbrook, Laura Viñas Caron, Lohit Garikipati, Marco De Martino, Marianne Dehasque, Mattias Sherman, Nikolaos Psonis, Owen Goodchild, Róisín Ferguson, Zhihan Zhao
-
+Anders Bergström, Kevin G. Daly, Deon de Jager, Marco De Martino, Marianne Dehasque, Jolijn Erven, Róisín Ferguson, Lohit Garikipati, Owen Goodchild, Germán Hernández-Alonso, Dani Kitaygorodskiy, Gisela Kopp, Juliana Larsdotter, Hannah Moots, George Popovici, Nikolaos Psonis, Lachie Scarsbrook, Mattias Sherman, Laura C. Viñas-Caron, He Yu, Zhihan Zhao
