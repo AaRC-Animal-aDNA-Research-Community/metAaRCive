@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/1197232865.svg)](https://doi.org/10.5281/zenodo.20085065)
+
 ## **metAaRCive: Overview**
 
 metAaRCive is a resource of metadata for published ancient animal genomes, curated by members of [AaRC](https://animal-adna.org/). 
