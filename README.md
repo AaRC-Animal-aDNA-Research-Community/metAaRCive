@@ -12,6 +12,8 @@ The `raw` folder holds a version of the resource that includes entries that did 
 
 To contribute to the resource, join our Element channel (see https://animal-adna.org/about/) and find the metadata working group.
 
+See the [GitHub wiki page](https://github.com/AaRC-Animal-aDNA-Research-Community/metAaRCive/wiki) for a general overview and introduction to the curation process.
+
 ## **Summary of curated metadata**
 
 | Sheet          | Entries released | Nuclear data | Mitochondrial data | Papers | Entries raw |
