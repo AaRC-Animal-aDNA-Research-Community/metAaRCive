@@ -9,6 +9,7 @@ import io
 import json
 import re
 import os
+import time
 
 # Dictionary to store tested URLs and outcomes (retained for caching functionality)
 tested_urls = {}
@@ -22,7 +23,7 @@ ENA_TECH_ALLOWED = [
 
 ENA_LIB_ALLOWED = [
     "WGS", "WGA", "Targeted-Capture", "AMPLICON", "Hi-C", "RAD-Seq", "GBS", 
-    "Synthetic-Long-Read", "OTHER"
+    "Synthetic-Long-Read", "RNA-Seq", "OTHER"
 ]
 
 COUNTRY_ALLOWED = [
@@ -85,7 +86,7 @@ SPECIAL_STRINGS = ["missing", "not applicable", "AaRC curator"]
 def url_exists(url):
     """
     Checks if a URL is accessible using http.client (GET request) and caches the result.
-    This function is intended for status-code based checks (< 400).
+    This function is intended for status-code based checks (< 400). Retries on failure.
     """
     url = str(url).strip()
     if url in tested_urls:
@@ -95,52 +96,54 @@ def url_exists(url):
     scheme = parsed_url.scheme.lower()
     netloc = parsed_url.netloc
     path = parsed_url.path if parsed_url.path else '/'
-    
-    # Add query parameters back to the path if they exist
+
     if parsed_url.query:
         path += '?' + parsed_url.query
 
     result = False
-    conn = None
+    retries = 3
 
-    try:
-        # Determine the connection type (HTTP or HTTPS)
-        if scheme == 'https':
-            # Use HTTPSConnection
-            conn = http.client.HTTPSConnection(netloc, timeout=10)
-        elif scheme == 'http':
-            # Use HTTPConnection
-            conn = http.client.HTTPConnection(netloc, timeout=10)
-        else:
-            # Scheme not supported for this checker
-            tested_urls[url] = False
-            return False
+    for attempt in range(retries):
+        conn = None
+        try:
+            if scheme == 'https':
+                conn = http.client.HTTPSConnection(netloc, timeout=10)
+            elif scheme == 'http':
+                conn = http.client.HTTPConnection(netloc, timeout=10)
+            else:
+                tested_urls[url] = False
+                return False
 
-        # Use a GET request for better compatibility with APIs/servers
-        # Add User-Agent to avoid being blocked by servers (e.g. NGDC) that reject bot-like requests
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        conn.request("GET", path, headers=headers)
-        response = conn.getresponse()
-        
-        # Read the entire response body to allow connection to close properly
-        response.read() 
-        
-        # Check for success (status < 400 includes 2xx success and 3xx redirect)
-        result = response.status < 400
-        
-    except Exception:
-        # Catch connection errors, timeouts, invalid host, etc.
-        result = False
-    finally:
-        if conn:
-            conn.close()
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            conn.request("GET", path, headers=headers)
+            response = conn.getresponse()
+            response.read()
+
+            status_code = response.status
+            result = status_code < 400
+            
+            # Retry on rate limiting (429 Too Many Requests) or server errors (5xx)
+            if status_code == 429 or status_code >= 500:
+                print(f"WARNING: URL existence check for {url} returned status {status_code} on attempt {attempt + 1}/{retries}. Retrying...", file=sys.stderr)
+            else:
+                break
+
+        except Exception as e:
+            result = False # Ensure result is False on exception
+            print(f"WARNING: URL existence check for {url} failed on attempt {attempt + 1}/{retries}. Error: {e}", file=sys.stderr)
+        finally:
+            if conn:
+                conn.close()
+
+        if attempt < retries - 1:
+            time.sleep(2) # Wait before retrying
 
     tested_urls[url] = result
     return result
 
 def get_url_content(url):
     """
-    Retrieves the HTTP status code and content of a URL.
+    Retrieves the HTTP status code and content of a URL, with retries on failure.
     Returns (status_code, content_string).
     """
     url = str(url).strip()
@@ -148,42 +151,53 @@ def get_url_content(url):
     scheme = parsed_url.scheme.lower()
     netloc = parsed_url.netloc
     path = parsed_url.path if parsed_url.path else '/'
-    
+
     if parsed_url.query:
         path += '?' + parsed_url.query
 
     status_code = 0
     content = ""
-    conn = None
+    retries = 3
 
-    try:
-        if scheme == 'https':
-            conn = http.client.HTTPSConnection(netloc, timeout=5)
-        elif scheme == 'http':
-            conn = http.client.HTTPConnection(netloc, timeout=5)
-        else:
-            return (0, "")
+    for attempt in range(retries):
+        conn = None
+        try:
+            if scheme == 'https':
+                conn = http.client.HTTPSConnection(netloc, timeout=10)
+            elif scheme == 'http':
+                conn = http.client.HTTPConnection(netloc, timeout=10)
+            else:
+                return (0, "")
 
-        conn.request("GET", path) 
-        response = conn.getresponse()
-        status_code = response.status
-        
-        # Read the content and decode it (assuming UTF-8)
-        content = response.read().decode('utf-8', errors='ignore')
-        
-    except Exception:
-        status_code = 0
-        content = ""
-    finally:
-        if conn:
-            conn.close()
+            conn.request("GET", path)
+            response = conn.getresponse()
+            status_code = response.status
+
+            content = response.read().decode('utf-8', errors='ignore')
+
+            # Retry on rate limiting (429 Too Many Requests) or server errors (5xx)
+            if status_code == 429 or status_code >= 500:
+                #print(f"WARNING: URL content fetch for {url} returned status {status_code} on attempt {attempt + 1}/{retries}. Retrying...", file=sys.stderr)
+                pass
+            else:
+                break
+
+        except Exception as e:
+            status_code = 0
+            content = ""
+            print(f"WARNING: URL content fetch for {url} failed on attempt {attempt + 1}/{retries}. Error: {e}", file=sys.stderr)
+        finally:
+            if conn:
+                conn.close()
+
+        if attempt < retries - 1:
+            time.sleep(2)
 
     return (status_code, content)
 
 def accession_mt_exists(accession):
     """
-    Validates an NCBI Nucleotide accession using ESummary API by checking
-    the XML content for the presence of a DocSum block. Caches the result.
+    Validates an NCBI Nucleotide accession using EFetch API. Caches the result.
     """
     accession = str(accession).strip()
     # Use a unique prefix to prevent cache key conflicts
@@ -192,16 +206,22 @@ def accession_mt_exists(accession):
     if cache_key in tested_urls:
         return tested_urls[cache_key]
 
-    BASE_URL_ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=nucleotide&id="
-    full_url = f"{BASE_URL_ESUMMARY}{accession}"
+    # Use EFetch instead of ESummary to better handle records without GI numbers
+    BASE_URL_EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nucleotide&id="
 
-    # Fetch status and content
-    status, content = get_url_content(full_url)
+    def check_accession(acc):
+        # Delay to respect NCBI E-utilities rate limits (3 req/sec without API key)
+        time.sleep(0.35)
+        full_url = f"{BASE_URL_EFETCH}{acc}&rettype=acc&retmode=text"
+        status, content = get_url_content(full_url)
+        return status < 400 and acc.upper() in content.upper()
     
-    # An accession is considered valid if:
-    # 1. The request was successful (status < 400).
-    # 2. The response content contains the <DocSum> tag (indicating a record was found).
-    is_valid = status < 400 and "<DocSum>" in content
+    # First attempt with the provided accession
+    is_valid = check_accession(accession)
+
+    # If it fails and lacks a version suffix, try appending '.1'
+    if not is_valid and '.' not in accession:
+        is_valid = check_accession(f"{accession}.1")
     
     tested_urls[cache_key] = is_valid
     return is_valid
