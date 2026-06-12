@@ -116,27 +116,6 @@ NATURALEARTH_TO_COUNTRY = {
 
 }
 
-# Load the high-resolution natural earth dataset containing country polygons globally
-try:
-    script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
-    local_file = os.path.join(script_dir, ".ne_10m_admin_0_countries.zip")
-    
-    if not os.path.exists(local_file):
-        print("INFO: Downloading high-resolution Natural Earth country boundaries...", file=sys.stderr)
-        url = "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_0_countries.zip"
-        urllib.request.urlretrieve(url, local_file)
-    
-    world_gdf = gpd.read_file(local_file)
-    
-    # Standardize country name column as expected downstream
-    if 'NAME' in world_gdf.columns and 'name' not in world_gdf.columns:
-        world_gdf['name'] = world_gdf['NAME']
-    elif 'ADMIN' in world_gdf.columns and 'name' not in world_gdf.columns:
-        world_gdf['name'] = world_gdf['ADMIN']
-except Exception as e:
-    print(f"WARNING: Could not load country boundary dataset: {e}", file=sys.stderr)
-    world_gdf = None
-
 # Hard-coded lists for ACCESSION validation
 EBI_ARCHIVES = ["INSDC", "ENA", "SRA", "DDBJ"] # Retained, though unused in new ACCESSION logic
 NGDC_ARCHIVES = ["GSA"]
@@ -562,6 +541,32 @@ def main():
     make_release_prefix = "metAaRCive" if args.prep_release else None
     excluded_authors = set(args.exclude_authors) if args.exclude_authors else set()
 
+    # Load the high-resolution natural earth dataset containing country polygons globally
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+        local_file = os.path.join(script_dir, ".ne_10m_admin_0_countries.zip")
+        
+        if not os.path.exists(local_file):
+            print("INFO: Downloading high-resolution Natural Earth country boundaries...", file=sys.stderr)
+            url = "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_0_countries.zip"
+            urllib.request.urlretrieve(url, local_file)
+        
+        world_gdf = gpd.read_file(local_file)
+        
+        # Standardize country name column as expected downstream
+        if 'NAME' in world_gdf.columns and 'name' not in world_gdf.columns:
+            world_gdf['name'] = world_gdf['NAME']
+        elif 'ADMIN' in world_gdf.columns and 'name' not in world_gdf.columns:
+            world_gdf['name'] = world_gdf['ADMIN']
+            
+        # Clean up the downloaded file after use
+        if os.path.exists(local_file):
+            os.remove(local_file)
+            
+    except Exception as e:
+        print(f"WARNING: Could not load country boundary dataset: {e}", file=sys.stderr)
+        world_gdf = None
+
     # --- Add report files to .gitignore if requested ---
     if txt_report_prefix:
         # Ignore all text reports, which will have the prefix and a .txt suffix
@@ -869,6 +874,48 @@ def main():
 
                                     except (ValueError, TypeError):
                                         pass
+
+                    # --- Age Range Consistency Check ---
+                    if "sample_age_lower" in sheet_data.columns and "sample_age_upper" in sheet_data.columns:
+                        run_age_check = True
+                        if selected_fields and not any(c in selected_fields for c in ["sample_age_lower", "sample_age_upper"]):
+                            run_age_check = False
+                        
+                        if run_age_check:
+                            lower_raw = row["sample_age_lower"]
+                            upper_raw = row["sample_age_upper"]
+
+                            if pd.notnull(lower_raw) and pd.notnull(upper_raw):
+                                lower_vals = get_clean_values(lower_raw)
+                                upper_vals = get_clean_values(upper_raw)
+                                
+                                for l_val, u_val in zip(lower_vals, upper_vals):
+                                    l_num = None
+                                    l_str = l_val[1:].strip() if l_val.startswith(">") else l_val
+                                    try:
+                                        l_num = float(l_str)
+                                    except ValueError:
+                                        pass
+                                        
+                                    u_num = None
+                                    u_str = u_val[1:].strip() if u_val.startswith(">") else u_val
+                                    try:
+                                        u_num = float(u_str)
+                                    except ValueError:
+                                        pass
+
+                                    if l_num is not None and u_num is not None:
+                                        if u_num < l_num:
+                                            sheet_errors.append({
+                                                "Sheet": sheet_name,
+                                                "Line": row_idx + 2,
+                                                "Sample ID": first_column_value,
+                                                "Field Name": "sample_age_lower;sample_age_upper",
+                                                "Error Type": "Invalid age range",
+                                                "Observed Value": f"{l_val};{u_val}",
+                                                "Error Details": f"sample_age_upper ({u_val}) is less than sample_age_lower ({l_val}).",
+                                                "Allowed values": ""
+                                            })
 
                     for col_name, cell_value in row.items():
                         if selected_fields and col_name not in selected_fields:
