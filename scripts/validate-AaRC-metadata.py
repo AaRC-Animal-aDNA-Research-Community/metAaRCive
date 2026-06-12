@@ -3,6 +3,7 @@ import pandas as pd
 import warnings 
 import argparse
 import http.client
+import urllib.parse
 from urllib.parse import urlparse
 import urllib.request
 import io
@@ -10,9 +11,15 @@ import json
 import re
 import os
 import time
+import requests
+import geopandas as gpd
+from shapely.geometry import Point
 
 # Dictionary to store tested URLs and outcomes (retained for caching functionality)
 tested_urls = {}
+
+# Cache for UBERON term validation results
+uberon_cache = {}
 
 # Hard-coded lists for ENA and country validations
 ENA_TECH_ALLOWED = [
@@ -75,6 +82,60 @@ COUNTRY_ALLOWED = [
     "Venezuela", "Viet Nam", "Virgin Islands", "Wake Island", "Wallis and Futuna",
     "West Bank", "Western Sahara", "Yemen", "Zambia", "Zimbabwe"
 ]
+
+# Dictionary to map Natural Earth dataset country names to COUNTRY_ALLOWED names
+NATURALEARTH_TO_COUNTRY = {
+    "United States of America": "USA",
+    "Dem. Rep. Congo": "Democratic Republic of the Congo",
+    "Central African Rep.": "Central African Republic",
+    "Eq. Guinea": "Equatorial Guinea",
+    "S. Sudan": "South Sudan",
+    "Bosnia and Herz.": "Bosnia and Herzegovina",
+    "Dominican Rep.": "Dominican Republic",
+    "Falkland Is.": "Falkland Islands (Islas Malvinas)",
+    "Solomon Is.": "Solomon Islands",
+    "W. Sahara": "Western Sahara",
+    "Vietnam": "Viet Nam",
+    "Brunei Darussalam": "Brunei",
+    "Lao PDR": "Laos",
+    "Dem. Rep. Korea": "North Korea",
+    "Korea": "South Korea",
+    "Côte d'Ivoire": "Cote d'Ivoire",
+    "eSwatini": "Eswatini",
+    "Palestine": "State of Palestine",
+    "West Bank": "State of Palestine",
+    "Gaza Strip": "State of Palestine",
+    "Russian Federation": "Russia",
+    "Macedonia": "North Macedonia",
+    "Republic of Congo": "Republic of the Congo",
+    "The Bahamas": "Bahamas",
+    "Faeroe Is.": "Faroe Islands",
+    "Cabo Verde": "Cape Verde",
+    "Åland": "Finland",
+    "Akrotiri": "Cyprus"
+
+}
+
+# Load the high-resolution natural earth dataset containing country polygons globally
+try:
+    script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+    local_file = os.path.join(script_dir, ".ne_10m_admin_0_countries.zip")
+    
+    if not os.path.exists(local_file):
+        print("INFO: Downloading high-resolution Natural Earth country boundaries...", file=sys.stderr)
+        url = "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_0_countries.zip"
+        urllib.request.urlretrieve(url, local_file)
+    
+    world_gdf = gpd.read_file(local_file)
+    
+    # Standardize country name column as expected downstream
+    if 'NAME' in world_gdf.columns and 'name' not in world_gdf.columns:
+        world_gdf['name'] = world_gdf['NAME']
+    elif 'ADMIN' in world_gdf.columns and 'name' not in world_gdf.columns:
+        world_gdf['name'] = world_gdf['ADMIN']
+except Exception as e:
+    print(f"WARNING: Could not load country boundary dataset: {e}", file=sys.stderr)
+    world_gdf = None
 
 # Hard-coded lists for ACCESSION validation
 EBI_ARCHIVES = ["INSDC", "ENA", "SRA", "DDBJ"] # Retained, though unused in new ACCESSION logic
@@ -185,7 +246,8 @@ def get_url_content(url):
         except Exception as e:
             status_code = 0
             content = ""
-            print(f"WARNING: URL content fetch for {url} failed on attempt {attempt + 1}/{retries}. Error: {e}", file=sys.stderr)
+            #print(f"WARNING: URL content fetch for {url} failed on attempt {attempt + 1}/{retries}. Error: {e}", file=sys.stderr)
+            pass
         finally:
             if conn:
                 conn.close()
@@ -244,6 +306,44 @@ def taxid_exists(taxid):
     
     # Cache the result under the taxid
     tested_urls[taxid] = result
+    return result
+
+def check_uberon_term_ols(uberon_id, session):
+    """
+    Validates an UBERON term using the EBI OLS4 API.
+    Returns a tuple: (is_valid, error_detail_message)
+    """
+    if uberon_id in uberon_cache:
+        return uberon_cache[uberon_id]
+
+    purl_suffix = uberon_id.replace(":", "_")
+    iri = f"http://purl.obolibrary.org/obo/{purl_suffix}"
+    
+    # OLS requires double URL encoded IRI
+    encoded_iri = urllib.parse.quote(urllib.parse.quote(iri, safe=''), safe='')
+    url = f"https://www.ebi.ac.uk/ols4/api/ontologies/uberon/terms/{encoded_iri}"
+    
+    time.sleep(0.1)  # Be polite to the API
+    
+    try:
+        response = session.get(url, timeout=5)
+        if response.status_code == 404:
+            result = (False, "UBERON term not found in EBI OLS4 database.")
+        elif response.status_code == 200:
+            try:
+                data = response.json()
+                if data.get("is_obsolete", False):
+                    result = (False, "UBERON term is marked as obsolete.")
+                else:
+                    result = (True, "")
+            except ValueError:
+                result = (False, "API returned a 200 OK but the JSON was malformed.")
+        else:
+            result = (False, f"API returned HTTP status {response.status_code} during validation.")
+    except requests.RequestException as e:
+        result = (False, f"Network failure while resolving UBERON term: {e}")
+
+    uberon_cache[uberon_id] = result
     return result
 
 def is_valid_biosample_accession_format(accession):
@@ -505,6 +605,9 @@ def main():
     release_raw_dfs = {}
     total_excluded_for_release = 0
 
+    # Initialize session for API calls to improve performance
+    requests_session = requests.Session()
+
     # Define the fixed header for the tab-delimited and DataFrame output
     REPORT_HEADER = ["Sheet", "Line", "Sample ID", "Field Name", "Error Type", "Observed Value", "Error Details", "Allowed values"]
     
@@ -690,6 +793,82 @@ def main():
                                         })
                                     else:
                                         seen_identifiers[col][val] = (row_idx + 2, current_samp_name)
+
+                    # --- Geographical Consistency Check ---
+                    if "latitude" in sheet_data.columns and "longitude" in sheet_data.columns and "geo_loc_name" in sheet_data.columns and world_gdf is not None:
+                        run_geo_check = True
+                        if selected_fields and not any(c in selected_fields for c in ["latitude", "longitude", "geo_loc_name"]):
+                            run_geo_check = False
+                        
+                        if run_geo_check:
+                            lat_raw = row["latitude"]
+                            lon_raw = row["longitude"]
+                            geo_raw = row["geo_loc_name"]
+
+                            if pd.notnull(lat_raw) and pd.notnull(lon_raw) and pd.notnull(geo_raw):
+                                if not is_special_string(lat_raw) and not is_special_string(lon_raw) and not is_special_string(geo_raw):
+                                    try:
+                                        lat_val = float(str(lat_raw).strip())
+                                        lon_val = float(str(lon_raw).strip())
+                                        geo_str = str(geo_raw).strip()
+                                        expected_country = geo_str.split(":", 1)[0].strip()
+                                        
+                                        if expected_country in COUNTRY_ALLOWED:
+                                            # Geopandas uses Point(longitude, latitude)
+                                            point = Point(lon_val, lat_val)
+                                            strict_match = world_gdf[world_gdf.geometry.contains(point)]
+                                            
+                                            resolved_country = None
+                                            if not strict_match.empty:
+                                                ne_country = strict_match.iloc[0]['name']
+                                                resolved_country = NATURALEARTH_TO_COUNTRY.get(ne_country, ne_country)
+                                            
+                                            # Map expected sub-regions or aliases to the parent country name used in Natural Earth
+                                            expected_mapped = NATURALEARTH_TO_COUNTRY.get(expected_country, expected_country)
+    
+                                            # If the strict check fails or resolves to the wrong country,
+                                            # check if the point is within a small buffer of the expected country.
+                                            if resolved_country != expected_mapped:
+                                                is_within_buffer = False
+                                                # Find the geometry for the expected country
+                                                expected_country_geom_df = world_gdf[world_gdf['name'].apply(lambda x: NATURALEARTH_TO_COUNTRY.get(x, x)) == expected_mapped]
+                                                
+                                                if not expected_country_geom_df.empty:
+                                                    if resolved_country is None:
+                                                        # A buffer of 50,000 meters (50 km) for oceanic points
+                                                        buffer_distance_m = 50000
+                                                    else:
+                                                        # A buffer of 2,000 meters (2 km) for land points
+                                                        buffer_distance_m = 2000
+                                                    
+                                                    # Create a custom Azimuthal Equidistant CRS centered exactly on the coordinate
+                                                    custom_crs = f"+proj=aeqd +lat_0={lat_val} +lon_0={lon_val} +datum=WGS84 +units=m"
+                                                    
+                                                    # Project the expected country's geometry to this accurate metric map
+                                                    projected_country = expected_country_geom_df.to_crs(custom_crs)
+                                                    buffered_geom = projected_country.iloc[0].geometry.buffer(buffer_distance_m)
+                                                    
+                                                    # In our custom map, our starting coordinate is now exactly at the origin (0, 0)
+                                                    center_point = Point(0, 0)
+                                                    if buffered_geom.contains(center_point):
+                                                        is_within_buffer = True
+                                                
+                                                # Only flag an error if the point is NOT within the buffered tolerance zone.
+                                                if not is_within_buffer:
+                                                    resolved_country_display = resolved_country if resolved_country else "none (oceanic?)"
+                                                    sheet_errors.append({
+                                                        "Sheet": sheet_name,
+                                                        "Line": row_idx + 2,
+                                                        "Sample ID": first_column_value,
+                                                        "Field Name": "latitude;longitude;geo_loc_name",
+                                                        "Error Type": "Geographical inconsistency",
+                                                        "Observed Value": f"{lat_raw};{lon_raw};{geo_raw}",
+                                                        "Error Details": f"Coordinates resolve to {resolved_country_display}, but country is given as {expected_country}.",
+                                                        "Allowed values": ""
+                                                    })
+
+                                    except (ValueError, TypeError):
+                                        pass
 
                     for col_name, cell_value in row.items():
                         if selected_fields and col_name not in selected_fields:
@@ -990,18 +1169,17 @@ def main():
                                         })
                                         continue
                                     
-                                    purl_suffix = uberon_id_raw.replace(":", "_")
-                                    purl_url = f"http://purl.obolibrary.org/obo/{purl_suffix}"
+                                    is_valid, err_detail = check_uberon_term_ols(uberon_id_raw, requests_session)
 
-                                    if not url_exists(purl_url):
+                                    if not is_valid:
                                         sheet_errors.append({
                                             "Sheet": sheet_name,
                                             "Line": row_idx + 2,
                                             "Sample ID": first_column_value,
                                             "Field Name": col_name,
-                                            "Error Type": "Unresolved UBERON Term",
+                                            "Error Type": "Unresolved or Obsolete UBERON Term",
                                             "Observed Value": entry,
-                                            "Error Details": f"UBERON term did not resolve at PURL.",
+                                            "Error Details": err_detail,
                                             "Allowed values": final_allowed_value
                                         })
                             
@@ -1300,6 +1478,27 @@ def main():
                             else:
                                 worksheet.write(legend_start_row + i, 0, col_name)
                                 worksheet.write(legend_start_row + i, 1, meaning)
+
+                        # Add Error Type Summary
+                        error_summary_start_row = legend_start_row + len(legend_content) + 2
+                        
+                        error_type_counts = {}
+                        for s_name, err_df in all_errors_dfs.items():
+                            if s_name != "Validation statistics" and not err_df.empty:
+                                if "Error Type" in err_df.columns:
+                                    counts = err_df["Error Type"].value_counts()
+                                    for err_type, count in counts.items():
+                                        error_type_counts[err_type] = error_type_counts.get(err_type, 0) + count
+                                        
+                        if error_type_counts:
+                            worksheet.write(error_summary_start_row, 0, "Error Type", legend_header_fmt)
+                            worksheet.write(error_summary_start_row, 1, "Number", legend_header_fmt)
+                            
+                            row_offset = 1
+                            for err_type, count in sorted(error_type_counts.items(), key=lambda x: x[1], reverse=True):
+                                worksheet.write(error_summary_start_row + row_offset, 0, err_type)
+                                worksheet.write(error_summary_start_row + row_offset, 1, count)
+                                row_offset += 1
 
             print(f"INFO: XLSX report successfully created: {xlsx_filename}", file=sys.stderr)
         except Exception as e:
