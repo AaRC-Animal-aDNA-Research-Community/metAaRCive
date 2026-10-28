@@ -290,7 +290,7 @@ def taxid_exists(taxid):
 def check_uberon_term_ols(uberon_id, session):
     """
     Validates an UBERON term using the EBI OLS4 API.
-    Returns a tuple: (is_valid, error_detail_message)
+    Returns a tuple: (is_valid, error_detail_message, ontology_label)
     """
     if uberon_id in uberon_cache:
         return uberon_cache[uberon_id]
@@ -302,25 +302,45 @@ def check_uberon_term_ols(uberon_id, session):
     encoded_iri = urllib.parse.quote(urllib.parse.quote(iri, safe=''), safe='')
     url = f"https://www.ebi.ac.uk/ols4/api/ontologies/uberon/terms/{encoded_iri}"
     
-    time.sleep(0.1)  # Be polite to the API
-    
-    try:
-        response = session.get(url, timeout=5)
-        if response.status_code == 404:
-            result = (False, "UBERON term not found in EBI OLS4 database.")
-        elif response.status_code == 200:
-            try:
-                data = response.json()
-                if data.get("is_obsolete", False):
-                    result = (False, "UBERON term is marked as obsolete.")
-                else:
-                    result = (True, "")
-            except ValueError:
-                result = (False, "API returned a 200 OK but the JSON was malformed.")
-        else:
-            result = (False, f"API returned HTTP status {response.status_code} during validation.")
-    except requests.RequestException as e:
-        result = (False, f"Network failure while resolving UBERON term: {e}")
+    retries = 3
+    result = (False, "Unknown error resolving UBERON term.", None)
+
+    for attempt in range(retries):
+        time.sleep(1 if attempt > 0 else 0.2)  # Be polite, backoff slightly on retries
+        
+        try:
+            response = session.get(url, timeout=15) # Increased timeout from 5 to 15 seconds
+            
+            if response.status_code == 404:
+                result = (False, "UBERON term not found in EBI OLS4 database.", None)
+                break
+            elif response.status_code == 200:
+                try:
+                    data = response.json()
+                    label = data.get("label")
+                    if data.get("is_obsolete", False):
+                        result = (False, "UBERON term is marked as obsolete.", label)
+                    else:
+                        result = (True, "", label)
+                except ValueError:
+                    result = (False, "API returned a 200 OK but the JSON was malformed.", None)
+                break
+            elif response.status_code == 429 or response.status_code >= 500:
+                result = (False, f"API returned HTTP status {response.status_code} during validation.", None)
+                if attempt < retries - 1:
+                    print(f"WARNING: API error {response.status_code} for UBERON {uberon_id}. Retrying...", file=sys.stderr)
+                    continue
+                break
+            else:
+                result = (False, f"API returned HTTP status {response.status_code} during validation.", None)
+                break
+
+        except requests.RequestException as e:
+            result = (False, f"Network failure while resolving UBERON term: {e}", None)
+            if attempt < retries - 1:
+                print(f"WARNING: Network failure for UBERON {uberon_id} on attempt {attempt + 1}/{retries}. Retrying... Error: {e}", file=sys.stderr)
+                continue
+            break
 
     uberon_cache[uberon_id] = result
     return result
@@ -878,18 +898,25 @@ def main():
                     # --- Age Range Consistency Check ---
                     if "sample_age_lower" in sheet_data.columns and "sample_age_upper" in sheet_data.columns:
                         run_age_check = True
-                        if selected_fields and not any(c in selected_fields for c in ["sample_age_lower", "sample_age_upper"]):
+                        
+                        check_cols = ["sample_age_lower", "sample_age_upper"]
+                        if "sample_age" in sheet_data.columns:
+                            check_cols.append("sample_age")
+                            
+                        if selected_fields and not any(c in selected_fields for c in check_cols):
                             run_age_check = False
                         
                         if run_age_check:
                             lower_raw = row["sample_age_lower"]
                             upper_raw = row["sample_age_upper"]
+                            age_raw = row["sample_age"] if "sample_age" in sheet_data.columns else None
 
                             if pd.notnull(lower_raw) and pd.notnull(upper_raw):
                                 lower_vals = get_clean_values(lower_raw)
                                 upper_vals = get_clean_values(upper_raw)
+                                age_vals = get_clean_values(age_raw) if pd.notnull(age_raw) else []
                                 
-                                for l_val, u_val in zip(lower_vals, upper_vals):
+                                for i, (l_val, u_val) in enumerate(zip(lower_vals, upper_vals)):
                                     l_num = None
                                     l_str = l_val[1:].strip() if l_val.startswith(">") else l_val
                                     try:
@@ -916,6 +943,29 @@ def main():
                                                 "Error Details": f"sample_age_upper ({u_val}) is less than sample_age_lower ({l_val}).",
                                                 "Allowed values": ""
                                             })
+                                        # Only check if sample_age is within the range if the range itself is valid
+                                        else:
+                                            if i < len(age_vals):
+                                                a_val = age_vals[i]
+                                                a_num = None
+                                                a_str = a_val[1:].strip() if a_val.startswith(">") else a_val
+                                                try:
+                                                    a_num = float(a_str)
+                                                except ValueError:
+                                                    pass
+                                                
+                                                if a_num is not None:
+                                                    if a_num < l_num or a_num > u_num:
+                                                        sheet_errors.append({
+                                                            "Sheet": sheet_name,
+                                                            "Line": row_idx + 2,
+                                                            "Sample ID": first_column_value,
+                                                            "Field Name": "sample_age;sample_age_lower;sample_age_upper",
+                                                            "Error Type": "Invalid age range",
+                                                            "Observed Value": f"{l_val};{u_val};{a_val}",
+                                                            "Error Details": f"sample_age ({a_val}) is not within the range defined by sample_age_lower ({l_val}) and sample_age_upper ({u_val}).",
+                                                            "Allowed values": ""
+                                                        })
 
                     for col_name, cell_value in row.items():
                         if selected_fields and col_name not in selected_fields:
@@ -1216,7 +1266,7 @@ def main():
                                         })
                                         continue
                                     
-                                    is_valid, err_detail = check_uberon_term_ols(uberon_id_raw, requests_session)
+                                    is_valid, err_detail, ontology_label = check_uberon_term_ols(uberon_id_raw, requests_session)
 
                                     if not is_valid:
                                         sheet_errors.append({
@@ -1227,6 +1277,21 @@ def main():
                                             "Error Type": "Unresolved or Obsolete UBERON Term",
                                             "Observed Value": entry,
                                             "Error Details": err_detail,
+                                            "Allowed values": final_allowed_value
+                                        })
+                                        continue
+
+                                    # Compare the supplied term name with the official OLS label (case- and whitespace-insensitive)
+                                    term_name = " ".join(parts[0].split()).lower()
+                                    if ontology_label and term_name != " ".join(ontology_label.split()).lower():
+                                        sheet_errors.append({
+                                            "Sheet": sheet_name,
+                                            "Line": row_idx + 2,
+                                            "Sample ID": first_column_value,
+                                            "Field Name": col_name,
+                                            "Error Type": "UBERON name and term mismatch",
+                                            "Observed Value": entry,
+                                            "Error Details": f'Term name "{parts[0]}" does not match the UBERON label for {uberon_id_raw}: "{ontology_label}".',
                                             "Allowed values": final_allowed_value
                                         })
                             
